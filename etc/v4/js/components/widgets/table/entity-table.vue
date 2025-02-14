@@ -2,8 +2,10 @@
   <div class="entity-table">
     <table>
       <thead>
-        <template v-for="col in tableHeaders">
-          <th class="noselect" @click="toggleOrderBy(col)">
+        <template v-for="(col, index) in tableHeaders">
+          <th class="noselect" 
+              @click="toggleOrderBy(col)" 
+              :style="getColumnStyle(index)">
             {{ col.name }}
             <template v-if="orderBy.index === col.index">
               <template v-if="orderBy.mode === 'none'">
@@ -15,13 +17,20 @@
                 <icon src="arrow-up"></icon>
               </template>
             </template>
+            <div v-if="index < tableHeaders.length - 1" 
+                 class="column-resizer"
+                 @mousedown.stop="startResize($event, index)"
+                 @dblclick.stop="resetColumnWidth(index)">
+            </div>
           </th>
         </template>
         <th class="squeeze"></th>
       </thead>
       <tbody>
         <tr v-for="(result, i) in results">
-          <td v-for="col in tableHeaders" :class="tdCss(i)">
+          <td v-for="(col, colIndex) in tableHeaders" 
+              :class="tdCss(i)"
+              :style="getColumnStyle(colIndex)">
             <template v-if="isEntity(col)">
               <template v-if="col.get(result) === '*'">
                 <div class="entity-table-none">
@@ -65,10 +74,12 @@ export default { name: "entity-table" }
 </script>
 
 <script setup>
-import { defineProps, computed, ref } from 'vue';
+import { defineProps, computed, ref, onMounted, onUnmounted, nextTick } from 'vue';
 
 const orderByModes = ["none", "asc", "desc"];
 const orderBy = ref({});
+const columnWidths = ref([]);
+const resizing = ref({ active: false, index: -1, startX: 0, startWidth: 0 });
 
 const props = defineProps({
   result: {type: Object, required: true }
@@ -234,9 +245,210 @@ function toggleOrderBy(col) {
   }
 }
 
+function getColumnStyle(index) {
+  const width = columnWidths.value[index] || 150;
+  return {
+    width: `${width}px`,
+    minWidth: '50px',
+    maxWidth: 'none',
+    position: 'relative',
+    overflow: 'hidden'
+  };
+}
+
+onMounted(() => {
+  console.log('[EntityTable] Component mounted');
+  // Initialize column widths based on actual number of columns
+  let totalColumns = tableHeaders.value.length;
+  columnWidths.value = new Array(totalColumns).fill(150);
+  console.log('[EntityTable] Initialized column widths:', { totalColumns, widths: columnWidths.value });
+  
+  // Add window event listeners for resizing
+  window.addEventListener('mousemove', handleResize, { passive: true });
+  window.addEventListener('mouseup', stopResize);
+});
+
+onUnmounted(() => {
+  console.log('[EntityTable] Component unmounting, removing event listeners');
+  window.removeEventListener('mousemove', handleResize);
+  window.removeEventListener('mouseup', stopResize);
+});
+
+function startResize(event, index) {
+  console.log('[EntityTable] Starting resize:', { index, event: event.type });
+  event.preventDefault();
+  event.stopPropagation();
+  
+  // Force stop any ongoing resize
+  if (resizing.value.active) {
+    stopResize();
+  }
+  
+  const target = event.target;
+  const th = target.closest('th');
+  if (!th) return;
+  
+  const initialWidth = th.offsetWidth;
+  const initialX = event.pageX;
+  
+  resizing.value = {
+    active: true,
+    index,
+    startX: initialX,
+    startWidth: initialWidth,
+    element: th
+  };
+  
+  // Add visual feedback
+  document.body.style.cursor = 'col-resize';
+  target.classList.add('resizing');
+  
+  // Force style update
+  nextTick(() => {
+    if (th) {
+      th.style.width = `${initialWidth}px`;
+      th.style.minWidth = '50px';
+      th.style.maxWidth = 'none';
+    }
+  });
+}
+
+function handleResize(event) {
+  if (!resizing.value.active) return;
+  
+  requestAnimationFrame(() => {
+    const delta = event.pageX - resizing.value.startX;
+    const newWidth = Math.max(50, resizing.value.startWidth + delta);
+    
+    // Update width in our state
+    columnWidths.value[resizing.value.index] = newWidth;
+    
+    // Force immediate DOM update
+    if (resizing.value.element) {
+      resizing.value.element.style.width = `${newWidth}px`;
+    }
+    
+    // Update all cells in this column
+    const table = resizing.value.element.closest('table');
+    if (table) {
+      const cells = table.querySelectorAll(`td:nth-child(${resizing.value.index + 1})`);
+      cells.forEach(cell => {
+        cell.style.width = `${newWidth}px`;
+        cell.style.minWidth = '50px';
+        cell.style.maxWidth = 'none';
+      });
+    }
+  });
+}
+
+function stopResize() {
+  if (!resizing.value.active) return;
+  
+  console.log('[EntityTable] Stopping resize:', {
+    index: resizing.value.index,
+    finalWidth: columnWidths.value[resizing.value.index]
+  });
+  
+  // Remove visual feedback
+  document.body.style.cursor = '';
+  if (resizing.value.element) {
+    const resizer = resizing.value.element.querySelector('.resizing');
+    if (resizer) {
+      resizer.classList.remove('resizing');
+    }
+  }
+  
+  resizing.value = { active: false, index: -1, startX: 0, startWidth: 0, element: null };
+}
+
+function resetColumnWidth(index) {
+  columnWidths.value[index] = 150;
+}
+
 </script>
 
 <style scoped>
+.entity-table {
+  position: relative;
+  height: 100%;
+  overflow-y: auto;
+  width: 100%;
+}
+
+table {
+  table-layout: fixed;
+  border-collapse: collapse;
+  width: 100%;
+  text-align: left;
+  font-variant: inherit;
+  font-size: inherit;
+}
+
+thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background-color: var(--bg-cell);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+th {
+  position: relative;
+  padding: var(--table-padding);
+  height: 1.5rem;
+  min-width: 50px;
+  color: var(--primary-text);
+  background-color: var(--bg-cell);
+  cursor: pointer;
+  user-select: none;
+}
+
+.column-resizer {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  height: 100%;
+  width: 6px;
+  background-color: transparent;
+  cursor: col-resize !important;
+  user-select: none;
+  touch-action: none;
+  z-index: 10;
+  transition: background-color 0.2s ease;
+}
+
+.column-resizer:hover,
+.column-resizer.resizing {
+  background-color: var(--primary-color) !important;
+  opacity: 0.5;
+}
+
+/* Add a visual indicator for the resizer */
+.column-resizer::after {
+  content: '';
+  position: absolute;
+  right: 2px;
+  top: 0;
+  height: 100%;
+  width: 2px;
+  background-color: var(--primary-color);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.column-resizer:hover::after,
+.column-resizer.resizing::after {
+  opacity: 0.5;
+}
+
+th, td {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: width 0.1s ease;
+  min-width: 50px;
+  max-width: none;
+}
 
 div.entity-table {
   position: relative;
@@ -259,21 +471,6 @@ table thead {
   top: 0px;
   z-index: 2;
   box-shadow: 0px 2px 10px rgba(0, 0, 0, 0.35);
-}
-
-th {
-  padding: var(--table-padding);
-  height: 1.5rem;
-  min-width: 100px;
-  color: var(--primary-text);
-  background-color: var(--bg-cell);
-  cursor: pointer;
-}
-
-th.squeeze {
-  width: 100%;
-  background-color: var(--bg-cell);
-  cursor: default;
 }
 
 th:hover {
@@ -312,4 +509,44 @@ div.entity-table-none {
   color: var(--secondary-text);
 }
 
+th.squeeze, td.squeeze {
+  width: auto;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.entity-table table {
+  table-layout: fixed !important;
+  width: 100% !important;
+}
+
+th, td {
+  position: relative !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
+  text-overflow: ellipsis !important;
+  transition: none !important; /* Remove transition for smoother resizing */
+}
+
+.column-resizer {
+  position: absolute !important;
+  right: -3px !important;
+  top: 0 !important;
+  height: 100% !important;
+  width: 6px !important;
+  background-color: transparent !important;
+  cursor: col-resize !important;
+  user-select: none !important;
+  touch-action: none !important;
+  z-index: 1000 !important; /* Ensure it's above other elements */
+}
+
+.column-resizer:hover,
+.column-resizer.resizing {
+  background-color: var(--primary-color) !important;
+  opacity: 0.5 !important;
+}
+
+/* ... rest of existing styles ... */
 </style>

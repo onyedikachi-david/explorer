@@ -16,7 +16,48 @@
           index: this.row_order.index,
           mode_index: this.mode == 'asc' ? 1 : (this.mode == 'desc' ? 2 : 3)
         },
-        group_enabled: {}
+        group_enabled: {},
+        columnWidths: [],
+        resizing: { active: false, index: -1, startX: 0, startWidth: 0 },
+        resizeObserver: null
+      }
+    },
+    mounted() {
+      console.log('[QueryTable] Component mounted');
+      // Initialize column widths
+      this.initColumnWidths();
+      
+      // Add window event listeners for resizing
+      window.addEventListener('mousemove', this.handleResize, { passive: false });
+      window.addEventListener('mouseup', this.stopResize);
+
+      // Handle parent container resizing
+      this.resizeObserver = new ResizeObserver(() => {
+        if (!this.resizing.active) {
+          this.adjustColumnWidths();
+        }
+      });
+      this.resizeObserver.observe(this.$el.closest('.content-container') || this.$el);
+
+      // Store initial column widths
+      this.$nextTick(() => {
+        const headers = this.$el.querySelectorAll('th');
+        let initialWidths = [];
+        headers.forEach((header, index) => {
+          if (!header.classList.contains('query-results-squeeze')) {
+            this.$set(this.columnWidths, index, header.offsetWidth);
+            initialWidths.push(header.offsetWidth);
+          }
+        });
+        console.log('[QueryTable] Initial column widths:', initialWidths);
+      });
+    },
+    beforeDestroy() {
+      console.log('[QueryTable] Component unmounting, removing event listeners');
+      window.removeEventListener('mousemove', this.handleResize);
+      window.removeEventListener('mouseup', this.stopResize);
+      if (this.resizeObserver) {
+        this.resizeObserver.disconnect();
       }
     },
     computed: {
@@ -161,11 +202,115 @@
           return this.column_style[index].style;
         }
       },
+      getColumnStyle(index) {
+        const width = this.columnWidths[index] || 150;
+        return {
+          width: `${width}px`,
+          minWidth: '50px',
+          maxWidth: 'none',
+          position: 'relative',
+          overflow: 'hidden',
+          whiteSpace: 'nowrap',
+          textOverflow: 'ellipsis',
+          boxSizing: 'border-box'
+        };
+      },
+      initColumnWidths() {
+        // Count total columns including entity column and value columns
+        let totalColumns = 0;
+        if (this.show_this) totalColumns++;
+        if (this.columns.vars) totalColumns += this.columns.vars.length;
+        if (this.columns.ids) {
+          totalColumns += this.columns.ids.filter(id => !this.term_is_tag(this.columns.ids.indexOf(id))).length;
+        }
+        this.columnWidths = new Array(totalColumns).fill(150);
+        console.log('[QueryTable] Initialized column widths:', { totalColumns, widths: this.columnWidths });
+      },
+      startResize(event, index) {
+        console.log('[QueryTable] Starting resize:', { index, event: event.type });
+        event.preventDefault();
+        event.stopPropagation();
+        
+        // Force stop any ongoing resize
+        if (this.resizing.active) {
+          this.stopResize();
+        }
+        
+        const target = event.target;
+        const th = target.closest('th');
+        if (!th) return;
+        
+        const initialWidth = th.offsetWidth;
+        const initialX = event.pageX;
+        
+        this.resizing = {
+          active: true,
+          index,
+          startX: initialX,
+          startWidth: initialWidth,
+          element: th
+        };
+        
+        // Add visual feedback
+        document.body.style.cursor = 'col-resize';
+        target.classList.add('resizing');
+        
+        // Force style update
+        this.$nextTick(() => {
+          if (th) {
+            th.style.width = `${initialWidth}px`;
+            th.style.minWidth = '50px';
+            th.style.maxWidth = 'none';
+          }
+        });
+      },
+      handleResize(event) {
+        if (!this.resizing.active) return;
+        
+        event.preventDefault();
+        event.stopPropagation();
+        
+        const deltaX = event.pageX - this.resizing.startX;
+        const newWidth = Math.max(50, this.resizing.startWidth + deltaX);
+        
+        // Update the column width in our state
+        this.$set(this.columnWidths, this.resizing.index, newWidth);
+        
+        // Update the header cell width
+        if (this.resizing.element) {
+          this.resizing.element.style.width = `${newWidth}px`;
+          
+          // Find and update all cells in this column
+          const table = this.resizing.element.closest('table');
+          if (table) {
+            const cells = table.querySelectorAll(`td:nth-child(${this.resizing.index + 1})`);
+            cells.forEach(cell => {
+              cell.style.width = `${newWidth}px`;
+              cell.style.minWidth = '50px';
+              cell.style.maxWidth = 'none';
+            });
+          }
+        }
+      },
+      stopResize() {
+        if (!this.resizing.active) return;
+        
+        document.body.style.cursor = '';
+        if (this.resizing.element) {
+          this.resizing.element.classList.remove('resizing');
+        }
+        
+        this.resizing = { active: false, index: -1, startX: 0, startWidth: 0, element: null };
+      },
+      resetColumnWidth(index) {
+        this.$set(this.columnWidths, index, 150);
+      },
       // Create table header
       create_header(h) {
-        const columns = this.columns;
-        const data = columns.data;
+        console.log('[QueryTable] Creating header with column widths:', this.columnWidths);
         let ths = [];
+        const data = this.columns.data;
+        const columns = this.columns;
 
         const order_by_icon = {
           asc: "codicons:triangle-down",
@@ -195,13 +340,30 @@
           }
 
           if (data.entities && data.entities.length && this.show_this) {
-            ths.push(h('th', { style: this.header_style(column), on: {
-              click: () => { this.on_order_by({kind: 'this'}); }
-            }}, [this.header_title(column, "Entity"), this.order_by.kind === "this" 
-              ? icon_elem 
-              : icon_placeholder
-            ]));
-            column ++;
+            const th = h('th', { 
+              style: this.getColumnStyle(column),
+              on: {
+                click: () => { this.on_order_by({kind: 'this'}); }
+              }
+            }, [
+              this.header_title(column, "Entity"),
+              this.order_by.kind === "this" ? icon_elem : icon_placeholder,
+              h('div', {
+                class: 'column-resizer',
+                on: {
+                  mousedown: (e) => { 
+                    e.stopPropagation();
+                    this.startResize(e, column);
+                  },
+                  dblclick: (e) => {
+                    e.stopPropagation();
+                    this.resetColumnWidth(column);
+                  }
+                }
+              })
+            ]);
+            ths.push(th);
+            column++;
           }
 
           if (columns.vars) {
@@ -211,15 +373,31 @@
               var_name = var_name_elems[var_name_elems.length - 1];
               var_name = this.header_title(column, var_name);
 
-              let index = i; // prevents hoisting of i
-              ths.push(h('th', { style: this.header_style(column), on: {
-                click: () => { this.on_order_by({kind: 'var', index: index}); }
-              }}, [var_name, (this.order_by.kind === 'var' && this.order_by.index === i) 
-                ? icon_elem 
-                : icon_placeholder
-              ]));
-
-              column ++; i ++;
+              let index = i;
+              const th = h('th', { 
+                style: this.getColumnStyle(column),
+                on: {
+                  click: () => { this.on_order_by({kind: 'var', index: index}); }
+                }
+              }, [
+                var_name,
+                (this.order_by.kind === 'var' && this.order_by.index === i) ? icon_elem : icon_placeholder,
+                h('div', {
+                  class: 'column-resizer',
+                  on: {
+                    mousedown: (e) => { 
+                      e.stopPropagation(); 
+                      this.startResize(e, index);
+                    },
+                    dblclick: (e) => {
+                      e.stopPropagation();
+                      this.resetColumnWidth(index);
+                    }
+                  }
+                })
+              ]);
+              ths.push(th);
+              column++; i++;
             }
           }
 
@@ -229,29 +407,37 @@
                 let name = this.term_header(i);
                 name = this.header_title(column, name);
 
-                let index = i; // prevents hoisting of i
-                ths.push(h('th', { style: this.header_style(column), on: {
-                  click: () => { this.on_order_by({kind: 'value', index: index}); }
-                }}, [name, (this.order_by.kind === 'value' && this.order_by.index === i) 
-                  ? icon_elem 
-                  : icon_placeholder
-                ]));
-
-                column ++;
+                let index = i;
+                const th = h('th', { 
+                  style: this.getColumnStyle(column),
+                  on: {
+                    click: () => { this.on_order_by({kind: 'value', index: index}); }
+                  }
+                }, [
+                  name,
+                  (this.order_by.kind === 'value' && this.order_by.index === i) ? icon_elem : icon_placeholder,
+                  h('div', {
+                    class: 'column-resizer',
+                    on: {
+                      mousedown: (e) => { 
+                        e.stopPropagation(); 
+                        this.startResize(e, column);
+                      },
+                      dblclick: (e) => {
+                        e.stopPropagation();
+                        this.resetColumnWidth(column);
+                      }
+                    }
+                  })
+                ]);
+                ths.push(th);
+                column++;
               }
             }
           }
 
-          ths.push( h('th', { class: 'query-results-squeeze'}) );
-
-          /* Insert placeholder for row icon at end of column */
+          ths.push(h('th', { class: 'query-results-squeeze' }));
           ths.push(h('th', {}));
-        } else {
-          const index = this.order_by.index;
-          const var_name = columns.vars[index];
-          ths.push(h('th', { on: {
-            click: () => { this.on_order_by({kind: 'var', index: index}); }
-          }}, [var_name, icon_elem]));
         }
 
         return h('thead', 
@@ -262,15 +448,9 @@
       // Create entity table cells
       create_entities(h, entities, labels) {
         let td_entities = [];
-        if (!entities) {
-          return td_entities;
-        }
+        if (!entities) return td_entities;
 
-        if (entities.count && (!labels || !labels.count)) {
-          labels = entities;
-        }
-
-        for (let i = 0; i < entities.length; i ++) {
+        for (let i = 0; i < entities.length; i++) {
           const index = this.index(i);
           const entity = entities[index];
           const label = labels[index];
@@ -281,15 +461,22 @@
           }
 
           const hierarchy = h('entity-hierarchy', {
-            props: { entity_path: entity } });
+            props: { entity_path: entity }
+          });
 
           const ref = h('entity-reference', {
             props: {
-              entity: entity, label: label, show_name: true, show_parent: false 
+              entity: entity,
+              label: label,
+              show_name: true,
+              show_parent: false
             },
-            on: this.$listeners });
+            on: this.$listeners
+          });
 
-          td_entities.push(h('td', [hierarchy, ref]));
+          td_entities.push(h('td', {
+            style: this.getColumnStyle(0)
+          }, [hierarchy, ref]));
         }
 
         return td_entities;
@@ -373,6 +560,11 @@
         const data = this.columns.data;
         let values = [];
 
+        let columnIndex = this.show_this ? 1 : 0;
+        if (this.columns.vars) {
+          columnIndex += this.columns.vars.length;
+        }
+
         for (let i = 0; i < columns.ids.length; i ++) {
           if (this.term_is_tag(i)) {
             continue;
@@ -394,11 +586,14 @@
                   on: this.$listeners 
                 });
 
-                value_array.push(h('td', [inspector]));
+                value_array.push(h('td', {
+                  style: this.getColumnStyle(columnIndex)
+                }, [inspector]));
               }
             }
           }
-          values.push( value_array );
+          values.push(value_array);
+          columnIndex++;
         }
 
         return values;
@@ -603,6 +798,18 @@
         this.order_by = { kind: 'this', mode: 'asc', mode_index: 0 };
         this.group_enabled = {};
         this.$emit('order-by', this.order_by);
+      },
+      adjustColumnWidths() {
+        const containerWidth = this.$el.offsetWidth;
+        const totalCurrentWidth = this.columnWidths.reduce((sum, width) => sum + width, 0);
+        
+        if (totalCurrentWidth > 0) {
+          const ratio = containerWidth / totalCurrentWidth;
+          this.columnWidths.forEach((width, index) => {
+            const newWidth = Math.max(50, Math.floor(width * ratio));
+            this.$set(this.columnWidths, index, newWidth);
+          });
+        }
       }
     },
     render: function(h) {
@@ -704,11 +911,23 @@
   }
 
   table.query-results-table {
-    border-collapse: collapse;
     width: 100%;
-    text-align: left;
-    font-variant: inherit;
-    font-size: inherit;
+    border-collapse: collapse;
+    table-layout: fixed !important;
+    position: relative;
+    z-index: 1;
+  }
+
+  table.query-results-table th,
+  table.query-results-table td {
+    position: relative;
+    padding: 8px;
+    border: 1px solid var(--grey-900);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    box-sizing: border-box;
+    min-width: 50px;
   }
 
   table.query-results-table th:first-child {
@@ -716,7 +935,6 @@
   }
 
   table.query-results-table th {
-    /* padding: 0px; */
     padding-left: var(--p-4);
     padding-right: var(--p-4);
     padding-bottom: var(--p-4);
@@ -828,18 +1046,13 @@
     left: -2px;
   }
 
-  th.query-results-squeeze {
-    width: 100%;
-    padding: 0px;
-    margin: 0px;
-    min-width: 0px;
-  }
-
+  th.query-results-squeeze,
   td.query-results-squeeze {
-    width: 100%;
-    padding: 0px;
-    margin: 0px;
-    min-width: 0px;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
   }
 
   span.query-result-color {
@@ -858,6 +1071,55 @@
     font-size: inherit;
     font-feature-settings: "tnum";
     height: 46px;
+    background-color: var(--cell-bg);
+    transition: background-color 0.2s ease;
+  }
+
+  .column-resizer {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    user-select: none;
+    background: transparent;
+    z-index: 100;
+    touch-action: none;
+  }
+
+  .column-resizer:hover,
+  .column-resizer.active {
+    background-color: var(--primary-color);
+    opacity: 0.3;
+  }
+
+  th.resizing {
+    background-color: var(--steel-700) !important;
+    user-select: none;
+  }
+
+  th.resizing .column-resizer {
+    background-color: var(--primary-color);
+    opacity: 0.5;
+    width: 2px;
+    right: -1px;
+  }
+
+  /* Ensure content doesn't affect column width */
+  table.query-results-table th > *:not(.column-resizer),
+  table.query-results-table td > * {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    width: 100%;
+    pointer-events: auto;
+  }
+
+  /* Prevent text selection while resizing */
+  .resizing * {
+    user-select: none !important;
+    pointer-events: none !important;
   }
 
 </style>
